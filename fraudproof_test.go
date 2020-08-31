@@ -2,18 +2,14 @@ package fraudproofs
 
 import (
 	"bytes"
-	//"crypto/sha256"
-	//"github.com/minio/sha256-simd"
 	"crypto/sha512"
 	"fmt"
 	"github.com/NebulousLabs/merkletree"
-	"github.com/jinzhu/copier"
-	"github.com/musalbas/smt"
+	"github.com/lazyledger/smt"
 	"math/rand"
 	"testing"
 	"time"
 )
-
 
 func TestTransaction(test *testing.T) {
 	// create good transaction
@@ -47,7 +43,7 @@ func TestBlock(test *testing.T) {
 	}
 
 	// create good block
-	goodTransaction, stateTree := generateBlockInput()
+	goodTransaction, stateTree := generateBlockInput(1000000)
 	goodBlock, err :=  NewBlock(goodTransaction, stateTree)
 	if err != nil {
 		test.Error(err)
@@ -99,7 +95,7 @@ func TestBlock(test *testing.T) {
 func TestBlockchain(test *testing.T) {
 	// add good blocks to blockchain
 	blockchain := NewBlockchain()
-	goodBlock, _ := NewBlock(generateBlockInput())
+	goodBlock, _ := NewBlock(generateBlockInput(1000000))
 	blockchain.Append(goodBlock) // add a first block
 	fp, err := blockchain.Append(goodBlock) // add a second block
 	if err != nil {
@@ -124,8 +120,13 @@ func TestBlockchain(test *testing.T) {
 }
 
 func TestTiming(test *testing.T) {
+	runs := 10
+	blockSize := 1000000 // in bytes
+	fmt.Println("Number of runs: ", runs)
+	fmt.Println("Block size: ", blockSize, "Bytes")
+
 	// create good block
-	goodTransaction, stateTree := generateBlockInput()
+	goodTransaction, stateTree := generateBlockInput(blockSize)
 	goodBlock, err :=  NewBlock(goodTransaction, stateTree)
 	if err != nil {
 		test.Error(err)
@@ -133,29 +134,31 @@ func TestTiming(test *testing.T) {
 
 	// check bad block (corrupted intermediate state)
 	goodBlock = corruptBlockInterStates(goodBlock)
-
 	start := time.Now()
-	goodFp, err := goodBlock.CheckBlock(stateTree)
+	for i := 0; i < runs; i++ {
+		goodFp, err := goodBlock.CheckBlock(stateTree)
+		if err != nil {
+			test.Error(err)
+		} else if goodFp == nil {
+			test.Error("should return a fraud proof")
+		}
+	}
 	t := time.Now()
 	elapsed := t.Sub(start)
-	fmt.Println("generate proof: ", elapsed)
-
-	if err != nil {
-		test.Error(err)
-	} else if goodFp == nil {
-		test.Error("should return a fraud proof")
-	}
+	fmt.Println("generate proof (average): ", int64(elapsed / time.Millisecond) / int64(runs), "ms")
 
 	// verify fraud proof of bad block
+	goodFp, err := goodBlock.CheckBlock(stateTree)
 	start = time.Now()
-	ret := goodBlock.VerifyFraudProof(*goodFp)
+	for i := 0; i < runs; i++ {
+		ret := goodBlock.VerifyFraudProof(*goodFp)
+		if ret != true {
+			test.Error("fraud proof does not check")
+		}
+	}
 	t = time.Now()
 	elapsed = t.Sub(start)
-	fmt.Println("verify proof: ", elapsed)
-
-	if ret != true {
-		test.Error("fraud proof does not check")
-	}
+	fmt.Println("verify proof (average): ", int64(elapsed / time.Microsecond) / int64(runs), "us")
 }
 
 
@@ -226,9 +229,9 @@ func corruptTransaction(t *Transaction) (*Transaction) {
 	return t
 }
 
-func generateBlockInput() ([]Transaction, *smt.SparseMerkleTree) {
-	// average Ethereum transactions per block (if block of 1MB)
-	const numTransactions = 4444 // 4444
+func generateBlockInput(blockSize int) ([]Transaction, *smt.SparseMerkleTree) {
+	// average Ethereum transaction size (225B)
+	numTransactions := blockSize / 225 // 4444 transactions for 1MB block
 	t := make([]Transaction, numTransactions)
 	for i := 0; i < len(t); i++ {
 		tmp, _ := NewTransaction(generateTransactionInput())
@@ -249,7 +252,7 @@ func generateCorruptedBlockInput() ([]Transaction, *smt.SparseMerkleTree) {
 }
 
 func generateBlockWithCorruptedTransactions() (*Block) {
-	block, _ := NewBlock(generateBlockInput())
+	block, _ := NewBlock(generateBlockInput(1000000))
 	t := block.transactions[0]
 	block.transactions[0] = *corruptTransaction(&t)
 	return block
@@ -273,8 +276,7 @@ func corruptBlockInterStates(b *Block) (*Block) {
 }
 
 func corruptFraudproofChunks(fp *FraudProof) (*FraudProof) {
-	copyFp := &FraudProof{}
-	copier.Copy(copyFp, fp)
+	copyFp := copyFraudproof(fp)
 	h := sha512.New512_256()
 	h.Write([]byte("random"))
 	copyFp.proofChunks[0] = [][]byte{h.Sum(nil), h.Sum(nil)}
@@ -282,10 +284,35 @@ func corruptFraudproofChunks(fp *FraudProof) (*FraudProof) {
 }
 
 func corruptFraudproofState(fp *FraudProof) (*FraudProof) {
-	copyFp := &FraudProof{}
-	copier.Copy(copyFp, fp)
+	copyFp := copyFraudproof(fp)
 	h := sha512.New512_256()
 	h.Write([]byte("random"))
-	copyFp.proofState[0].SideNodes = [][]byte{h.Sum(nil), h.Sum(nil)}
+	copyFp.writeKeys[0] = h.Sum(nil)
+	return copyFp
+}
+
+// I didn't manage to make a deep copier work (.eg github.com/jinzhu/copier)
+func copyFraudproof(fp *FraudProof) (*FraudProof) {
+	copyFp := &FraudProof{
+		make([][]byte, len(fp.writeKeys)), //writeKeys
+		make([][]byte, len(fp.oldData)), //oldData
+		make([][]byte, len(fp.readKeys)), //readKeys
+		make([][]byte, len(fp.readData)), //readData
+		make([]smt.SparseCompactMerkleProof, len(fp.proofState)), //proofState
+		make([][]byte, len(fp.chunks)), // chunks
+		make([][][]byte, len(fp.proofChunks)), //proofChunks
+		make([]uint64, len(fp.chunksIndexes)), // chunksIndexes
+		fp.numOfLeaves, // numOfLeaves
+	}
+
+	copy(copyFp.writeKeys, fp.writeKeys)
+	copy(copyFp.oldData, fp.oldData)
+	copy(copyFp.readKeys, fp.readKeys)
+	copy(copyFp.readData, fp.readData)
+	copy(copyFp.proofState, fp.proofState)
+	copy(copyFp.chunks, fp.chunks)
+	copy(copyFp.proofChunks, fp.proofChunks)
+	copy(copyFp.chunksIndexes, fp.chunksIndexes)
+
 	return copyFp
 }

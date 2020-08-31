@@ -5,10 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"github.com/NebulousLabs/merkletree"
-	//"crypto/sha256"
-	//"github.com/minio/sha256-simd"
 	"crypto/sha512"
-	"github.com/musalbas/smt"
+	"github.com/lazyledger/smt"
 )
 
 // Step defines the interval on which to compute intermediate state roots (must be a positive integer)
@@ -64,7 +62,6 @@ func fillStateTree(t []Transaction, stateTree *smt.SparseMerkleTree) ([][]byte, 
 	var stateRoot []byte
 	var interStateRoots [][]byte
 	for i := 0; i < len(t); i++ {
-		//fmt.Println("transaction size: ", len(t[i].Serialize()))
 		for j := 0; j < len(t[i].writeKeys); j++ {
 			root, err := stateTree.Update(t[i].writeKeys[j], t[i].newData[j])
 			if err != nil {
@@ -188,7 +185,6 @@ func (b *Block) CheckBlock(stateTree *smt.SparseMerkleTree) (*FraudProof, error)
 				return nil, err
 			}
 			var concernedChunks [][]byte
-			//fmt.Println(chunksIndexes)
 			for j := 0; j < len(chunksIndexes); j++ {
 				concernedChunks = append(concernedChunks, chunks[chunksIndexes[j]])
 			}
@@ -237,13 +233,10 @@ func (b *Block) getChunksIndexes(t []Transaction) ([]uint64, uint64, error) {
 		return nil, 0, err
 	}
 
-	//fmt.Println(buffMap)
 	var chunksIndexes []uint64
 	for i := 0; i < len(t); i++ {
 		index := uint64(buffMap[t[i].HashKey()]/chunksSize)
-		//chunksIndexes = append(chunksIndexes, index)
 		length := int(binary.LittleEndian.Uint16(t[i].Serialize()[:MaxSize]))
-		//fmt.Println(buffMap[t[i].HashKey()]/chunksSize, length)
 		last := length/chunksSize
 		for j := 0; j <= last; j++ {
 			chunksIndexes = append(chunksIndexes, index + uint64(j))
@@ -278,18 +271,15 @@ func (b *Block) VerifyFraudProof(fp FraudProof) bool {
 	// 2. extract new data from chunks
 	var indexes []int
 	var buff []byte
-	//fmt.Println()
-	//fmt.Println(fp.chunks)
 	for i := 0; i < len(fp.chunks); i++ {
 		indexes = append(indexes, int(fp.chunks[i][0]))
 		buff = append(buff, fp.chunks[i][1:]...)
 	}
-	//fmt.Println(buff)
+
 	var newData [][]byte
 	buff = buff[indexes[0]:]
 	for i := 0; len(buff) >= MaxSize; i++ {
 		length := int(binary.LittleEndian.Uint16(buff[:MaxSize]))
-		//fmt.Println(len(buff), length)
 		if len(buff) < length {
 			break
 		}
@@ -297,8 +287,6 @@ func (b *Block) VerifyFraudProof(fp FraudProof) bool {
 		buff = buff[length:]
 		newData = append(newData, t.newData...)
 	}
-	//fmt.Println(len(newData), newData)
-	//fmt.Println(len(fp.writeKeys), fp.writeKeys)
 
 	// 3. check keys-values contained in the transaction are in the state tree for old data
 	subtree := smt.NewDeepSparseMerkleSubTree(smt.NewSimpleMap(), sha512.New512_256(), b.stateRoot)
@@ -307,11 +295,17 @@ func (b *Block) VerifyFraudProof(fp FraudProof) bool {
 		if err != nil {
 			return false
 		}
-		subtree.AddBranch(proof, fp.writeKeys[i],fp.oldData[i])
+		err = subtree.AddBranch(proof, fp.writeKeys[i], newData[i])
+		if err != nil {
+			return false
+		}
 		// 4. update keys with new data
-		subtree.Update(fp.writeKeys[i], newData[i])
+		_, err = subtree.Update(fp.writeKeys[i], newData[i])
+		if err != nil {
+			return false
+		}
 	}
-	if bytes.Compare(b.stateRoot, subtree.Root()) != 0 {
+	if !bytes.Equal(b.stateRoot, subtree.Root()) {
 		return false
 	}
 

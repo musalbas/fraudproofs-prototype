@@ -1,9 +1,7 @@
 package fraudproofs
 
 import (
-	"github.com/musalbas/smt"
-	//"crypto/sha256"
-	//"github.com/minio/sha256-simd"
+	"github.com/lazyledger/smt"
 	"crypto/sha512"
 )
 
